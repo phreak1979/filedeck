@@ -1,0 +1,52 @@
+# FileDeck from the published single image on GitHub Container Registry. Nothing is built locally.
+#   docker run --rm ghcr.io/phreak1979/filedeck:latest init-secrets > .env    # first time only; then set PUBLIC_URL in .env
+#   docker compose -f compose-github.yaml up -d
+#   docker compose -f compose-github.yaml pull && docker compose -f compose-github.yaml up -d     # to update
+# The admin password is the BOOTSTRAP_ADMIN_PASSWORD line in .env (FileDeck never prints it in its logs).
+# No init-secrets? Copy env.github.example to .env and fill in the REQUIRED values (it explains each one).
+# This is separate from compose.yaml, which builds three images from this repository.
+name: filedeck-github
+
+services:
+  filedeck:
+    image: ghcr.io/phreak1979/filedeck:latest
+    pull_policy: always
+    restart: unless-stopped
+    env_file: .env
+    ports:
+      - "${FILEDECK_BIND:-127.0.0.1}:${FILEDECK_HTTP_PORT:-8088}:8080"
+    volumes:
+      - staging:/var/lib/filedeck/staging
+      # local folders: the API can only expose paths under /mnt
+      - ${FILEDECK_DATA_DIR:-./data/files}:/mnt/data
+      # --- Host health (optional, read-only; see docs/operations.md "Host health"). Uncomment ALL of these lines
+      # --- AND set HOST_HEALTH_ENABLED=true in .env to see this server's CPU, memory and disks in FileDeck (admins only).
+      #- /proc:/host/proc:ro
+      #- /sys:/host/sys:ro
+      # One line per disk to watch; the name after /host/disks/ is what the widget shows. Always :ro.
+      #- /srv/data:/host/disks/data:ro
+      #- /mnt/media:/host/disks/media:ro
+    depends_on:
+      postgres: { condition: service_healthy }
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+
+  postgres:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: filedeck
+      POSTGRES_DB: filedeck
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?keep POSTGRES_PASSWORD in .env (init-secrets writes it)}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U filedeck -d filedeck"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    # no `ports:` on purpose: the database is reachable only from this Compose network
+
+volumes:
+  pgdata:
+  staging:
