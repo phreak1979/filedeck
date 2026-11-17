@@ -7,7 +7,7 @@
 A self-hosted file manager with real windows, safe transfers, a conflict-proof editor, a terminal and live monitoring.
 Local folders and SFTP servers side by side, with your data's integrity first.
 
-[Quick start](#quick-start) · [Features](#what-you-get) · [Security](#built-to-be-trusted) · [Docs](docs/operations.md) · [Develop](#develop)
+[Quick start](#quick-start) · [Features](#what-you-get) · [Security](#built-to-be-trusted) · [HTTPS](#https) · [Backups](#backups) · [Updating](#updating)
 
 ![FileDeck desktop](docs/screenshots/desktop.png)
 
@@ -79,7 +79,7 @@ overwrite (audited). A lost connection never shows a false "saved".
 * **Credentials are encrypted** on the server and never sent to the browser. The one exception is the admin-only Wallet: it asks for
   your password again, locks after a minute, reveals one secret at a time and is audited.
 * **Per-root permissions** (RBAC) and an **audit log** of what happened and who did it.
-* Containers run as non-root with a read-only root filesystem, no capabilities and `no-new-privileges`.
+* The container runs as a non-root user with no capabilities and `no-new-privileges`.
 * Only the web port is published. PostgreSQL is reachable only inside the Compose network.
 * Terminal sessions end the moment access ends.
 
@@ -88,7 +88,7 @@ overwrite (audited). A lost connection never shows a false "saved".
 You need Docker with Compose. The image is published on GitHub Container Registry, so nothing is built locally.
 
 ```bash
-# 1. Get compose-github.yaml from this repository, then in the same folder:
+# 1. Download compose-github.yaml from this repository into an empty folder, then in that folder:
 docker run --rm ghcr.io/phreak1979/filedeck:latest init-secrets > .env    # generates the secrets
 
 # 2. Edit .env: set PUBLIC_URL to the exact address you will type in the browser
@@ -100,75 +100,64 @@ docker compose -f compose-github.yaml up -d
 Open `http://127.0.0.1:8088` (or your `PUBLIC_URL`) and sign in as `admin`. The password is the `BOOTSTRAP_ADMIN_PASSWORD` line in
 `.env`. FileDeck never prints it in its logs. Change it after the first login.
 
-**Update** at any time:
+Prefer not to use `init-secrets`? Copy `env.github.example` to `.env` and fill in the required values. The file explains each one.
+
+### Your files
+
+* **Local folders** can only live under `/mnt` inside the container. The compose file mounts `FILEDECK_DATA_DIR` (default `./data/files`)
+  at `/mnt/data`. Mount more host folders with extra `volumes:` lines, then add them as folders in the app.
+* **SFTP servers** are added in the browser. FileDeck shows the host key and asks you to confirm it before it will connect.
+* **Host health** is optional: uncomment the read-only `/proc`, `/sys` and disk mounts in the compose file and set
+  `HOST_HEALTH_ENABLED=true` in `.env`.
+
+### HTTPS
+
+FileDeck listens on `127.0.0.1:8088` by default. Put a TLS reverse proxy in front of it. With Nginx Proxy Manager:
+
+1. Add a **Proxy Host** for your domain, scheme `http`, forwarding to the Docker host on port `8088`. Turn on *Websockets Support*,
+   a Let's Encrypt certificate, *Force SSL* and *HSTS*. Turn *Cache Assets* off.
+2. Set `PUBLIC_URL=https://your.domain` in `.env`, exactly as people type it. It drives the origin checks.
+3. In the proxy's **Advanced** tab (needed for uploads, downloads and live updates):
+   ```nginx
+   client_max_body_size 33m;          # one upload chunk is at most 32 MiB; editor saves are at most 20 MiB
+   proxy_request_buffering off;       # stream chunks through
+   proxy_buffering off;               # downloads, ZIPs and the live-update stream must not be buffered
+   proxy_read_timeout 1h;
+   proxy_send_timeout 1h;
+   ```
+4. For internet exposure, prefer a VPN or an IP allow-list. A file manager is a high-value target.
+
+### Backups
+
+Back up three things, and keep the keys apart from the database:
+
+| What | How |
+|---|---|
+| Database (users, audit, encrypted credentials) | `docker compose -f compose-github.yaml exec -T postgres pg_dump -U filedeck -Fc filedeck > filedeck.dump` |
+| `CREDENTIAL_KEYS` from `.env` | Copy it to a password manager or an offline store. **Without it, stored SFTP credentials cannot be recovered.** |
+| `.env` and `compose-github.yaml` | Your configuration |
+
+Uploads in flight are staged in a disposable volume. Your files live on the folders and servers themselves, so back those up
+separately. Try a restore now and then; an untested backup is a hope, not a backup.
+
+### Lost admin password
+
+The first admin is created only when the database has no users, so changing `BOOTSTRAP_ADMIN_PASSWORD` later does nothing. To set a new
+password:
+
+```bash
+docker compose -f compose-github.yaml exec filedeck node reset-password.mjs admin
+```
+
+It prints a generated password once, turns the account on again, ends its sessions and records the reset in the audit log.
+
+## Updating
 
 ```bash
 docker compose -f compose-github.yaml pull && docker compose -f compose-github.yaml up -d
 ```
 
-* **HTTPS:** put Nginx Proxy Manager (or any TLS proxy) in front. See [docs/operations.md](docs/operations.md).
-* **Local folders** can only live under `/mnt` inside the container. The compose file mounts `FILEDECK_DATA_DIR` there.
-* **Backups, key rotation, a lost admin password:** all in [docs/operations.md](docs/operations.md).
-* Prefer not to use `init-secrets`? Copy `env.github.example` to `.env` and fill in the required values. It explains each one.
+Database migrations apply automatically on start. Take a backup first. If any of the three processes inside the container stops, the
+container stops, so `restart: unless-stopped` brings them all back together.
 
-### Build from source instead
-
-```bash
-./scripts/init-secrets.sh            # creates ./secrets (prints the initial admin password once)
-cp .env.example .env                 # set PUBLIC_URL and FILEDECK_DATA_DIR / FILEDECK_UID / FILEDECK_GID
-docker compose up -d --build
-scripts/smoke.sh                     # optional: build, start, log in, list files, check hardening, tear down
-```
-
-## Status
-
-All planned phases are done: Foundation, Finder, Transfers, Editor and Launcher, plus the Terminal, Monitor, host health, server
-groups, jump hosts and MFA support described above. **Next: hardening.** The full plan is in
-`FileDeck_Technical_Specification.md` and `openspec/`.
-
-## Documentation
-
-* [docs/operations.md](docs/operations.md): running it, HTTPS, backups, transfers, editor, terminal, monitoring, upgrading
-* [docs/providers.md](docs/providers.md): exactly what the LOCAL and SFTP providers guarantee, and where SFTP is weaker
-* [docs/accessibility.md](docs/accessibility.md): keyboard use and accessibility
-* [docs/openapi.json](docs/openapi.json): the API (also served at `/api/v1/openapi.json`)
-
----
-
-## Develop
-
-Requires Node 22+, pnpm 12, Docker.
-
-```bash
-pnpm install
-docker run -d --name filedeck-dev-pg -e POSTGRES_USER=filedeck -e POSTGRES_PASSWORD=filedeck \
-  -e POSTGRES_DB=filedeck -p 127.0.0.1:55440:5432 postgres:17-alpine
-export DATABASE_URL=postgresql://filedeck:filedeck@127.0.0.1:55440/filedeck
-pnpm db:deploy                       # apply migrations
-pnpm test                            # unit + integration + security + resilience (needs Postgres; Docker for SFTP suites)
-pnpm typecheck && pnpm lint
-pnpm test:e2e                        # Playwright against your system Chrome: own database, fixtures, API and web server
-```
-
-Dev servers: `pnpm --filter @filedeck/api dev` and `pnpm --filter @filedeck/web dev` (the web dev server proxies `/api`;
-set `PUBLIC_URL` to the exact origin you browse, e.g. `http://127.0.0.1:5183`, and `SESSION_COOKIE_SECURE=false`,
-`SESSION_COOKIE_NAME=filedeck_session` for plain HTTP).
-
-Test databases/servers: the suite uses `filedeck_test` on the same Postgres and starts a throwaway chrooted OpenSSH
-container for the SFTP suites (set `FILEDECK_SKIP_SFTP=1` to skip them).
-
-## Layout
-
-```
-apps/{web,api,worker}      React shell · Fastify API (OpenAPI 3.1 at /api/v1/openapi.json) · transfer worker
-packages/shared            Zod schemas, error codes, typed config (browser-safe entry; Node config at /config)
-packages/db                Prisma client            prisma/   schema + migrations
-packages/filesystem-core   provider contract, path guard
-packages/provider-local    LOCAL provider (fd-anchored, symlink-safe)
-packages/provider-sftp     SFTP provider (host-key pinning, pooling, safe overwrite)
-packages/transfer-core     transfer state machine, leases, fencing
-tests/                     contract · security · resilience · integration
-docs/                      providers.md (capability matrix and guarantees), operations.md, accessibility.md, openapi.json
-```
-
-See `docs/providers.md` for exactly what each provider guarantees (and where SFTP is weaker).
+Pin a version instead of `latest` by changing the image line in the compose file, for example `ghcr.io/phreak1979/filedeck:0.11.9`.
